@@ -1,7 +1,4 @@
-"""
-EvuMusic Telegram bot — aiogram 3.x
-Ключи подписки: 7 / 30 / 90 / 360 дней + навсегда.
-"""
+"""EvuMusic Telegram bot — aiogram 3.x + asyncpg"""
 from __future__ import annotations
 
 import asyncio
@@ -22,6 +19,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
+    BotCommand,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -32,15 +30,19 @@ from aiogram.types import (
 from dotenv import load_dotenv
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 log = logging.getLogger("evumusic")
 
-# ─────────── Config ───────────
+# ─── Config ───
 BOT_TOKEN    = os.getenv("BOT_TOKEN")
 WEBAPP_URL   = (os.getenv("WEBAPP_URL") or "").rstrip("/")
 DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_IDS = [
-    int(x) for x in re.split(r"[,\s]+", os.getenv("ADMIN_IDS") or "") if x.strip().isdigit()
+    int(x) for x in re.split(r"[,\s]+", os.getenv("ADMIN_IDS") or "")
+    if x.strip().isdigit()
 ]
 
 if not BOT_TOKEN:
@@ -54,7 +56,7 @@ if not ADMIN_IDS:
 
 pool: asyncpg.Pool | None = None
 
-# ─────────── DB Schema ───────────
+# ─── Schema ───
 SQL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
   id                   BIGSERIAL PRIMARY KEY,
@@ -72,7 +74,6 @@ CREATE TABLE IF NOT EXISTS users (
   created_at           TIMESTAMPTZ DEFAULT now(),
   last_seen_at         TIMESTAMPTZ DEFAULT now()
 );
-
 ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_until TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_type  TEXT;
 
@@ -85,45 +86,44 @@ CREATE TABLE IF NOT EXISTS invite_codes (
 );
 
 CREATE TABLE IF NOT EXISTS subscription_keys (
-  code           TEXT PRIMARY KEY,
-  duration_days  INT,                       -- NULL = навсегда
-  duration_label TEXT NOT NULL,
-  created_by     BIGINT NOT NULL REFERENCES users(telegram_id),
-  created_at     TIMESTAMPTZ DEFAULT now(),
-  used_by        BIGINT REFERENCES users(telegram_id),
-  used_at        TIMESTAMPTZ,
-  note           TEXT
+  code            TEXT PRIMARY KEY,
+  duration_days   INT,
+  duration_label  TEXT NOT NULL,
+  created_by      BIGINT NOT NULL REFERENCES users(telegram_id),
+  created_at      TIMESTAMPTZ DEFAULT now(),
+  used_by         BIGINT REFERENCES users(telegram_id),
+  used_at         TIMESTAMPTZ,
+  note            TEXT
 );
-
 CREATE INDEX IF NOT EXISTS idx_subkeys_created ON subscription_keys(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_subkeys_used    ON subscription_keys(used_by);
 
 CREATE TABLE IF NOT EXISTS library_tracks (
-  id         BIGSERIAL PRIMARY KEY,
-  user_id    BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
-  track_id   BIGINT NOT NULL,
-  title      TEXT NOT NULL,
-  artist     TEXT,
-  duration   TEXT,
-  added_at   TIMESTAMPTZ DEFAULT now(),
+  id          BIGSERIAL PRIMARY KEY,
+  user_id     BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+  track_id    BIGINT NOT NULL,
+  title       TEXT NOT NULL,
+  artist      TEXT,
+  duration    TEXT,
+  added_at    TIMESTAMPTZ DEFAULT now(),
   UNIQUE (user_id, track_id)
 );
 
 CREATE TABLE IF NOT EXISTS favorites (
-  user_id   BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
-  track_id  BIGINT NOT NULL,
-  title     TEXT NOT NULL,
-  artist    TEXT,
-  duration  TEXT,
-  added_at  TIMESTAMPTZ DEFAULT now(),
+  user_id     BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+  track_id    BIGINT NOT NULL,
+  title       TEXT NOT NULL,
+  artist      TEXT,
+  duration    TEXT,
+  added_at    TIMESTAMPTZ DEFAULT now(),
   PRIMARY KEY (user_id, track_id)
 );
 
 CREATE TABLE IF NOT EXISTS playlists (
-  id         BIGSERIAL PRIMARY KEY,
-  user_id    BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
-  title      TEXT NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT now()
+  id          BIGSERIAL PRIMARY KEY,
+  user_id     BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+  title       TEXT NOT NULL,
+  created_at  TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS playlist_tracks (
@@ -143,7 +143,6 @@ CREATE INDEX IF NOT EXISTS idx_playlists_user ON playlists(user_id);
 CREATE INDEX IF NOT EXISTS idx_invite_used    ON invite_codes(used_by);
 """
 
-# ─────────── Constants ───────────
 DURATIONS = {
     "7":       (7,    "7 дней"),
     "30":      (30,   "30 дней"),
@@ -152,12 +151,12 @@ DURATIONS = {
     "forever": (None, "Навсегда"),
 }
 
-# ─────────── Helpers ───────────
+# ─── Helpers ───
 def is_admin(tg_id: int) -> bool:
     return tg_id in ADMIN_IDS
 
 def gen_key() -> str:
-    h = secrets.token_hex(8).upper()          # 16 hex chars
+    h = secrets.token_hex(8).upper()
     return f"EVU-{h[0:4]}-{h[4:8]}-{h[8:12]}-{h[12:16]}"
 
 def sub_is_active(row) -> bool:
@@ -178,11 +177,11 @@ def sub_human(row) -> str:
         return f"до {until.strftime('%d.%m.%Y %H:%M')}"
     return "истекла"
 
-# ─────────── Keyboards ───────────
+# ─── Keyboards ───
 def webapp_kb(label: str = "Открыть EvuMusic") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=label, web_app=WebAppInfo(url=f"{WEBAPP_URL}/index.html"))],
-    ])
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=label, web_app=WebAppInfo(url=f"{WEBAPP_URL}/index.html"))
+    ]])
 
 def start_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -192,28 +191,27 @@ def start_kb() -> InlineKeyboardMarkup:
 
 def admin_keys_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="7 дней",      callback_data="genkey:7"),
-         InlineKeyboardButton(text="30 дней",     callback_data="genkey:30")],
-        [InlineKeyboardButton(text="90 дней",     callback_data="genkey:90"),
-         InlineKeyboardButton(text="360 дней",    callback_data="genkey:360")],
+        [InlineKeyboardButton(text="7 дней",  callback_data="genkey:7"),
+         InlineKeyboardButton(text="30 дней", callback_data="genkey:30")],
+        [InlineKeyboardButton(text="90 дней", callback_data="genkey:90"),
+         InlineKeyboardButton(text="360 дней", callback_data="genkey:360")],
         [InlineKeyboardButton(text="💎 Навсегда", callback_data="genkey:forever")],
         [InlineKeyboardButton(text="✏️ Своя длительность", callback_data="genkey:custom")],
     ])
 
-# ─────────── DB ops ───────────
+# ─── DB ops ───
 async def upsert_user(user, invited_by: int | None = None) -> None:
     await pool.execute(
-        """
-        INSERT INTO users (telegram_id, username, first_name, last_name, language_code, is_admin, invited_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT (telegram_id) DO UPDATE SET
-          username      = EXCLUDED.username,
-          first_name    = EXCLUDED.first_name,
-          last_name     = EXCLUDED.last_name,
-          language_code = EXCLUDED.language_code,
-          is_admin      = EXCLUDED.is_admin,
-          last_seen_at  = now()
-        """,
+        """INSERT INTO users
+             (telegram_id, username, first_name, last_name, language_code, is_admin, invited_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)
+           ON CONFLICT (telegram_id) DO UPDATE SET
+             username      = EXCLUDED.username,
+             first_name    = EXCLUDED.first_name,
+             last_name     = EXCLUDED.last_name,
+             language_code = EXCLUDED.language_code,
+             is_admin      = EXCLUDED.is_admin,
+             last_seen_at  = now()""",
         user.id, user.username, user.first_name, user.last_name,
         user.language_code or "ru", is_admin(user.id), invited_by,
     )
@@ -234,11 +232,11 @@ async def use_invite_code(code: str, tg_id: int) -> dict:
             )
             if not row:
                 return {"ok": False, "reason": "not_found"}
-            result = await conn.execute(
+            r = await conn.execute(
                 "UPDATE invite_codes SET used_by=$1, used_at=now() WHERE code=$2 AND used_by IS NULL",
                 tg_id, code,
             )
-            if result.endswith("0"):
+            if r.endswith("0"):
                 return {"ok": False, "reason": "already_used"}
             return {"ok": True, "inviter": row["created_by"]}
 
@@ -247,7 +245,8 @@ async def create_invite_code(tg_id: int) -> str:
         code = secrets.token_hex(4)
         try:
             await pool.execute(
-                "INSERT INTO invite_codes (code, created_by) VALUES ($1,$2)", code, tg_id,
+                "INSERT INTO invite_codes (code, created_by) VALUES ($1,$2)",
+                code, tg_id,
             )
             return code
         except asyncpg.UniqueViolationError:
@@ -274,7 +273,8 @@ async def generate_key(created_by: int, days: int | None, label: str) -> str:
         code = gen_key()
         try:
             await pool.execute(
-                """INSERT INTO subscription_keys (code, duration_days, duration_label, created_by)
+                """INSERT INTO subscription_keys
+                   (code, duration_days, duration_label, created_by)
                    VALUES ($1,$2,$3,$4)""",
                 code, days, label, created_by,
             )
@@ -292,15 +292,15 @@ async def activate_key(code: str, tg_id: int) -> dict:
             if user and user["subscription_type"] == "forever":
                 return {"ok": False, "reason": "already_forever"}
 
-            key_row = await conn.fetchrow(
+            kr = await conn.fetchrow(
                 "SELECT duration_days FROM subscription_keys WHERE code=$1 AND used_by IS NULL FOR UPDATE",
                 code,
             )
-            if not key_row:
+            if not kr:
                 exists = await conn.fetchval("SELECT 1 FROM subscription_keys WHERE code=$1", code)
                 return {"ok": False, "reason": "used" if exists else "not_found"}
 
-            days = key_row["duration_days"]
+            days = kr["duration_days"]
             if days is None:
                 await conn.execute(
                     "UPDATE users SET subscription_until=NULL, subscription_type='forever' WHERE telegram_id=$1",
@@ -310,14 +310,12 @@ async def activate_key(code: str, tg_id: int) -> dict:
             else:
                 sub_type = f"{days}d"
                 until = await conn.fetchval(
-                    """
-                    UPDATE users
-                       SET subscription_until = GREATEST(COALESCE(subscription_until, now()), now())
-                                                + $2 * interval '1 day',
-                           subscription_type  = $3
-                     WHERE telegram_id=$1
-                     RETURNING subscription_until
-                    """,
+                    """UPDATE users
+                          SET subscription_until = GREATEST(COALESCE(subscription_until, now()), now())
+                                                  + ($2 || ' days')::interval,
+                              subscription_type  = $3
+                        WHERE telegram_id = $1
+                    RETURNING subscription_until""",
                     tg_id, days, sub_type,
                 )
 
@@ -327,11 +325,10 @@ async def activate_key(code: str, tg_id: int) -> dict:
             )
             return {"ok": True, "until": until, "sub_type": sub_type, "days": days}
 
-# ─────────── FSM ───────────
+# ─── FSM / Filters / Middleware ───
 class KeyGenStates(StatesGroup):
     waiting_custom_days = State()
 
-# ─────────── Filters / middleware ───────────
 class NotCommandText(BaseFilter):
     async def __call__(self, message: Message) -> bool:
         return bool(message.text and not message.text.startswith("/"))
@@ -355,20 +352,19 @@ class BanMiddleware(BaseMiddleware):
                     return None
         return await handler(event, data)
 
-# ─────────── Router ───────────
 router = Router()
 router.message.middleware(BanMiddleware())
 router.callback_query.middleware(BanMiddleware())
 
-# ─────────── Handlers ───────────
+# ─── Handlers ───
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject):
     if await is_banned(message.from_user.id):
-        await message.answer("⛔ Доступ к боту заблокирован.")
+        await message.answer("⛔ Доступ заблокирован.")
         return
 
     payload = (command.args or "").strip()
-    invited_by: int | None = None
+    invited_by = None
 
     if payload.startswith("ref_"):
         try:
@@ -386,8 +382,8 @@ async def cmd_start(message: Message, command: CommandObject):
     await upsert_user(message.from_user, invited_by)
     await message.answer(
         "Твоя музыка, всегда рядом.\n\n"
-        "Напиши название песни или открой плеер: поиск, любимые треки и личные плейлисты.\n\n"
-        "Если у тебя есть ключ подписки — активируй его: <code>/activate КОД</code>",
+        "Напиши название песни или открой плеер.\n\n"
+        "Если у тебя есть ключ подписки — <code>/activate КОД</code>",
         reply_markup=start_kb(),
     )
 
@@ -399,8 +395,8 @@ async def cmd_help(message: Message):
         "/app — кнопка приложения\n"
         "/me — профиль\n"
         "/sub — статус подписки\n"
-        "/activate КОД — активировать ключ подписки\n"
-        "/invite — создать инвайт-код (если есть доступ)\n"
+        "/activate КОД — активировать ключ\n"
+        "/invite — инвайт (если есть доступ)\n"
         "/stats — статистика (админ)",
         reply_markup=webapp_kb(),
     )
@@ -417,13 +413,11 @@ async def cmd_me(message: Message):
     if not row:
         await message.answer("Сначала нажми /start", reply_markup=webapp_kb())
         return
-
     themes = {"blue": "Синяя", "white": "Белая", "black": "Чёрная"}
     uname = message.from_user.username
     name_line = f"@{uname}" if uname else escape(message.from_user.first_name or "—")
     invited = f"\nПригласил: <code>{row['invited_by']}</code>" if row["invited_by"] else ""
     role = "админ" if (is_admin(message.from_user.id) or row["is_admin"]) else "участник"
-
     await message.answer(
         f"Профиль: {name_line}\n"
         f"Тема: {themes.get(row['theme'], row['theme'])}\n"
@@ -441,7 +435,10 @@ async def cmd_sub(message: Message):
         await message.answer("Сначала нажми /start", reply_markup=webapp_kb())
         return
     if sub_is_active(row):
-        await message.answer(f"✅ Подписка активна: <b>{sub_human(row)}</b>", reply_markup=webapp_kb())
+        await message.answer(
+            f"✅ Подписка активна: <b>{sub_human(row)}</b>",
+            reply_markup=webapp_kb(),
+        )
     else:
         await message.answer(
             "❌ Активной подписки нет.\n\nАктивируй ключ: <code>/activate КОД</code>",
@@ -458,22 +455,25 @@ async def cmd_activate(message: Message, command: CommandObject):
 
     res = await activate_key(code, message.from_user.id)
     if not res["ok"]:
-        if res["reason"] == "not_found":
-            await message.answer("❌ Ключ не найден.")
-        elif res["reason"] == "used":
-            await message.answer("❌ Этот ключ уже был использован.")
-        elif res["reason"] == "already_forever":
-            await message.answer("💎 У тебя уже вечная подписка — ключ остался неиспользованным.")
-        else:
-            await message.answer("❌ Не удалось активировать ключ.")
+        msgs = {
+            "not_found": "❌ Ключ не найден.",
+            "used": "❌ Этот ключ уже был использован.",
+            "already_forever": "💎 У тебя уже вечная подписка — ключ не потрачен.",
+        }
+        await message.answer(msgs.get(res["reason"], "❌ Не удалось активировать."))
         return
 
     if res["sub_type"] == "forever":
-        text = "🎉 <b>Вечная подписка активирована!</b>"
+        await message.answer(
+            "🎉 <b>Вечная подписка активирована!</b>",
+            reply_markup=webapp_kb(),
+        )
     else:
-        until = res["until"]
-        text = f"✅ <b>Подписка продлена!</b>\nДействует до {until.strftime('%d.%m.%Y %H:%M')}"
-    await message.answer(text, reply_markup=webapp_kb())
+        await message.answer(
+            f"✅ <b>Подписка продлена!</b>\n"
+            f"Действует до {res['until'].strftime('%d.%m.%Y %H:%M')}",
+            reply_markup=webapp_kb(),
+        )
 
 @router.message(Command("invite"))
 async def cmd_invite(message: Message):
@@ -485,7 +485,10 @@ async def cmd_invite(message: Message):
     code = await create_invite_code(message.from_user.id)
     me = await message.bot.get_me()
     link = f"https://t.me/{me.username}?start=inv_{code}"
-    await message.answer(f"🎟 Инвайт-код: <code>{code}</code>\nСсылка: {link}", reply_markup=webapp_kb())
+    await message.answer(
+        f"🎟 Инвайт-код: <code>{code}</code>\nСсылка: {link}",
+        reply_markup=webapp_kb(),
+    )
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
@@ -502,13 +505,15 @@ async def cmd_stats(message: Message):
         f"💎 Вечных подписок: {s['forever_users']}"
     )
 
-# ── Админ: генерация ключей ──
+# ─── Admin: keys ───
 @router.message(Command("key"))
 async def cmd_key(message: Message):
     if not is_admin(message.from_user.id):
         return
-    await message.answer("🔑 <b>Генерация ключа подписки</b>\n\nВыбери длительность:",
-                         reply_markup=admin_keys_kb())
+    await message.answer(
+        "🔑 <b>Генерация ключа подписки</b>\n\nВыбери длительность:",
+        reply_markup=admin_keys_kb(),
+    )
 
 @router.message(Command("genkey"))
 async def cmd_genkey(message: Message, command: CommandObject):
@@ -521,7 +526,9 @@ async def cmd_genkey(message: Message, command: CommandObject):
     days, label = DURATIONS[arg]
     code = await generate_key(message.from_user.id, days, label)
     await message.answer(
-        f"✅ Ключ на <b>{label}</b>:\n\n<code>{code}</code>\n\nАктивация: <code>/activate {code}</code>"
+        f"✅ Ключ на <b>{label}</b>:\n\n"
+        f"<code>{code}</code>\n\n"
+        f"Активация: <code>/activate {code}</code>"
     )
 
 @router.message(Command("keys"))
@@ -578,28 +585,26 @@ async def cmd_admin(message: Message):
         "/invite — создать инвайт-код"
     )
 
-# ── Callbacks для генерации ──
 @router.callback_query(F.data.startswith("genkey:"))
 async def cb_genkey(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("Только для админов", show_alert=True)
         return
-
     arg = callback.data.split(":", 1)[1]
     if arg == "custom":
         await callback.message.answer("✏️ Введи количество дней (1–36500):")
         await state.set_state(KeyGenStates.waiting_custom_days)
         await callback.answer()
         return
-
     if arg not in DURATIONS:
         await callback.answer("Неизвестная длительность", show_alert=True)
         return
-
     days, label = DURATIONS[arg]
     code = await generate_key(callback.from_user.id, days, label)
     await callback.message.answer(
-        f"✅ Ключ на <b>{label}</b>:\n\n<code>{code}</code>\n\nАктивация: <code>/activate {code}</code>"
+        f"✅ Ключ на <b>{label}</b>:\n\n"
+        f"<code>{code}</code>\n\n"
+        f"Активация: <code>/activate {code}</code>"
     )
     await callback.answer("Ключ создан")
 
@@ -618,11 +623,59 @@ async def process_custom_days(message: Message, state: FSMContext):
         if not 1 <= days <= 36500:
             raise ValueError
     except (ValueError, TypeError):
-        await message.answer("Нужно целое число от 1 до 36500. Попробуй ещё раз или /cancel.")
+        await message.answer("Нужно целое число 1–36500. Попробуй ещё раз или /cancel.")
         return
-
     await state.clear()
     label = f"{days} дней"
     code = await generate_key(message.from_user.id, days, label)
     await message.answer(
-        f"✅ Ключ на <b>{label}</b>:\n\n<
+        f"✅ Ключ на <b>{label}</b>:\n\n"
+        f"<code>{code}</code>\n\n"
+        f"Активация: <code>/activate {code}</code>"
+    )
+
+@router.message(NotCommandText())
+async def any_text(message: Message):
+    if await is_banned(message.from_user.id):
+        return
+    await upsert_user(message.from_user)
+    await message.answer(
+        "Поиск треков — в приложении 👇",
+        reply_markup=webapp_kb("Открыть поиск"),
+    )
+
+# ─── Entrypoint ───
+async def main() -> None:
+    global pool
+    pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+    async with pool.acquire() as conn:
+        await conn.execute(SQL_SCHEMA)
+    log.info("DB schema OK")
+
+    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(router)
+
+    try:
+        await bot.set_my_commands([
+            BotCommand(command="start",    description="Открыть EvuMusic"),
+            BotCommand(command="app",      description="Кнопка приложения"),
+            BotCommand(command="me",       description="Мой профиль"),
+            BotCommand(command="sub",      description="Моя подписка"),
+            BotCommand(command="activate", description="Активировать ключ"),
+            BotCommand(command="invite",   description="Создать инвайт"),
+            BotCommand(command="help",     description="Помощь"),
+        ])
+    except Exception as e:
+        log.warning("set_my_commands failed: %s", e)
+
+    log.info("EvuMusic bot starting...")
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
